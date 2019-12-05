@@ -1,0 +1,46 @@
+#version 430 compatibility
+
+const float OFFSET = 0.5;
+
+layout (local_size_x = 16, local_size_y = 16, local_size_z=1) in;
+
+layout(location = 2) uniform mat3 intrinsics_inv;
+
+layout (r16, binding = 0) readonly uniform image2D img_depthTimet;//input
+
+layout (rgba32f, binding = 1) writeonly uniform image2D img_normalxyDdepth2d;//output
+layout (rg32f, binding = 2) writeonly uniform image2D img_normalzVisible;//output
+layout (rgba32f, binding = 3) writeonly uniform image2D img_DeltaDDeltaRGB;//output
+
+void main() {
+
+  ivec2 coords = ivec2(gl_GlobalInvocationID);
+
+  ivec2 coordsxm = ivec2(coords.x-1,coords.y);
+  ivec2 coordsxp = ivec2(coords.x+1,coords.y);
+  ivec2 coordsym = ivec2(coords.x,coords.y-1);
+  ivec2 coordsyp = ivec2(coords.x,coords.y+1);
+
+  float dataxm = imageLoad(img_depthTimet, coordsxm).r;
+  float dataxp = imageLoad(img_depthTimet, coordsxp).r;
+  float dataym = imageLoad(img_depthTimet, coordsym).r;
+  float datayp = imageLoad(img_depthTimet, coordsyp).r;
+
+  float visible = sign(dataxm)*sign(dataxp)*sign(dataym)*sign(datayp);
+
+  vec3 delta1 = intrinsics_inv * (vec3((coordsxm.x+OFFSET)*dataxm ,(coordsxm.y+OFFSET)*dataxm,dataxm )  - vec3((coordsxp.x+OFFSET)*dataxp ,(coordsxp.y+OFFSET)*dataxp,dataxp ));
+  vec3 delta2 = intrinsics_inv * (vec3((coordsym.x+OFFSET)*dataym ,(coordsym.y+OFFSET)*dataym,dataym )  - vec3((coordsyp.x+OFFSET)*datayp ,(coordsyp.y+OFFSET)*datayp,datayp ));
+
+
+  vec3 nrm = cross(delta1,delta2);
+  if(visible >0.0)
+        nrm = normalize(nrm);
+  nrm = nrm * sign(nrm.z) * sign(visible);//
+
+  imageStore(img_normalxyDdepth2d, coords, vec4(nrm.x,nrm.y,sign(dataxp)*sign(dataxm) *(dataxp-dataxm)/2.0,sign(datayp)*sign(dataym)*(datayp-dataym)/2.0));
+  imageStore(img_normalzVisible, coords, vec4(nrm.z,visible,nrm.z,visible) );
+  imageStore(img_DeltaDDeltaRGB, coords, vec4(0.0,0.0,0.0,0.0) );
+
+
+}
+

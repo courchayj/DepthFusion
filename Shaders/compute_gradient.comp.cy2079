@@ -1,0 +1,117 @@
+#version 430 compatibility
+
+const float Z_median = 0.01;
+
+layout (local_size_x = 16, local_size_y = 16, local_size_z=1) in;
+
+
+layout(location = 1) uniform mat3 intrinsics_full;
+layout(location = 2) uniform mat3 intrinsics_inv;
+layout(location = 3) uniform mat4 rotation;
+
+layout (r16, binding = 0) uniform image2D img_depthTimetp1;//input
+layout (r16, binding = 1) uniform image2D img_depthTimet;//input
+
+//layout (rgba32f, binding = 2) uniform image2D img_energy;//output
+
+layout (rgba32f, binding = 4) uniform image2D img_normalxyDdepth2d;//input
+layout (rg32f, binding = 5) uniform image2D img_normalzVisible;//input
+layout (std430, binding=3) buffer Vec
+{
+    vec4 positions[];
+};
+
+layout (std430, binding=4) buffer Vec1
+{
+    vec4 energy123[];
+};
+layout (std430, binding=5) buffer Vec2
+{
+    vec4 energy456[];
+};
+
+
+void main() {
+  ivec2 coords = ivec2(gl_GlobalInvocationID);
+  float data = imageLoad(img_depthTimetp1, coords).r;
+
+  //t+1
+  const uint id = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  vec3 pos = intrinsics_inv * vec3((coords.x+0.5)*data ,(coords.y+0.5)*data,data );//put depth inside positions *data;
+
+  positions[id].xyz =  pos;//DONE ONCE FOR ALL ALMOST WITH ONLY DEPTH VARYING * Delta depth
+  positions[id].w=1;
+
+  //multiply by RT + scene flow for final version: to get time t
+  //if in FRAME!!!
+  vec4 posRT = rotation * vec4(pos,1.0);
+  //correponding pixel time t
+  vec3 pi = intrinsics_full * posRT.xyz;//ADDING R, T
+  ivec2 coordst = ivec2((pi.x / pi.z)-0.5,(pi.y / pi.z)-0.5);
+
+  pos.xyz = posRT.xyz;
+
+  float datat       = imageLoad(img_depthTimet, coordst).r;
+  vec4 normalDdepth = imageLoad(img_normalxyDdepth2d, coordst);
+  vec2 normalzVisible = imageLoad(img_normalzVisible, coordst).rg;
+
+  vec3 normal = vec3(normalDdepth.x,normalDdepth.y, normalzVisible.x );
+
+  vec3 post = intrinsics_inv * vec3((coordst.x+0.5)*datat ,(coordst.y+0.5)*datat,datat );
+  //STORE VARIABLES FOR GRADIENT
+  float epsilon =0.000001;
+  float vz = max(pos.z,epsilon);
+  float vz2=vz*vz;
+  float vz3 =vz2*vz;
+  float scalar = dot(normal,pos);
+  float scalar2 = scalar*scalar;
+  float ddepth = 1.0 - datat / vz;
+  float ddepth2 = ddepth*ddepth;
+  float dDdX = normalDdepth.z;
+  float dDdY = normalDdepth.w;
+  float K11 = intrinsics_full[0][0];
+  float K12 = intrinsics_full[1][0];
+  float K13 = intrinsics_full[2][0];
+  float K21 = intrinsics_full[0][1];
+  float K22 = intrinsics_full[1][1];
+  float K23 = intrinsics_full[2][1];
+  float DKv = dDdX *(K11 * pos.x + K12 * pos.y + K13 * pos.z) + dDdY *(K21 * pos.x + K22 * pos.y + K23 * pos.z) ;
+
+  float weight =1.0;// exp(-(vz-datat)*(vz-datat) / (Z_median*Z_median));
+
+  //ddepth=sign(ddepth);
+  float dEdw1 = weight*(scalar * normal.x * ddepth2 - scalar2 * ddepth * (dDdX * K11 + dDdY * K21) / vz2);
+  float dEdw2 = weight*(scalar * normal.y * ddepth2 - scalar2 * ddepth * (dDdX * K12 + dDdY * K22) / vz2);
+  float dEdw3 = weight*(scalar * normal.z * ddepth2 + scalar2 * ddepth * (- (dDdX * K13 + dDdY * K23) / vz2 + DKv / vz3 + datat /vz2));
+
+  float dEdw4 = weight*(scalar * (normal.y*pos.z-normal.z*pos.y )* ddepth2 + scalar2 * ddepth * (- (dDdX * (K12*pos.z-K13*pos.y) + dDdY * (K22*pos.z - K23*pos.y)) / vz2 - DKv * pos.y / vz3 - datat * pos.y /vz2));
+  float dEdw5 = weight*(scalar * (-normal.x*pos.z+normal.z*pos.x )* ddepth2 + scalar2 * ddepth * (- (dDdX * (-K11*pos.z+K13*pos.x) + dDdY * (-K21*pos.z + K23*pos.x)) / vz2 + DKv * pos.x / vz3 + datat * pos.x /vz2));
+  float dEdw6 = weight*(scalar * (normal.x*pos.y-normal.y*pos.x )* ddepth2 + scalar2 * ddepth * (- (dDdX * (K11*pos.y-K12*pos.x) + dDdY * (K21*pos.y - K22*pos.x)) / vz2 ));
+
+/*
+float dEdw4 = (scalar * (normal.y*pos.z-normal.z*pos.y )* ddepth);
+float dEdw5 = (scalar * (-normal.x*pos.z+normal.z*pos.x )* ddepth);
+float dEdw6 = (scalar * (normal.x*pos.y-normal.y*pos.x )* ddepth);
+float dEdw1 = scalar * normal.x * ddepth ;
+float dEdw2 = scalar * normal.y * ddepth ;
+float dEdw3 = scalar * normal.z * ddepth ;
+*/
+
+  vec3 dRot = vec3(dEdw4,dEdw5,dEdw6);
+
+  //if(normalzVisible.y>0.0) {
+    //imageStore(img_energy, coords, sign(data)*sign(datat)*vec4(normal/10000.0,1.0/*ddepth2*scalar2*/));//do scalar product with normal: 0 if not visible
+    //imageStore(img_energy, coords, sign(data)*sign(datat)*vec4(dRot,1.0/*ddepth2*scalar2*/));//do scalar product with normal: 0 if not visible
+    energy123[id]=sign(normalzVisible.y)*sign(data)*sign(datat)*vec4(dEdw1,dEdw2,dEdw3,ddepth2*scalar2);
+    energy456[id]=sign(normalzVisible.y)*sign(data)*sign(datat)*vec4(dEdw4,dEdw5,dEdw6,ddepth2*scalar2);
+  //}
+  //else {
+    //imageStore(img_energy, coords, vec4(0));//do scalar product with normal: 0 if not visible
+    //energy123[id]=sign(data)*sign(datat)*vec4(0);
+    //energy456[id]=sign(data)*sign(datat)*vec4(0);
+  //}
+
+  //PUT ROTATION WILL PUT W123 INSTEAD ONLY FOR VISUALIZING
+  //visible t+1 in frame t thanks to reprojection: later on fragment shader
+
+}

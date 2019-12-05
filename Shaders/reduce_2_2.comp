@@ -1,0 +1,52 @@
+#version 430 compatibility
+
+struct vec8{
+vec4 data1;
+vec4 data2;
+};
+
+
+
+layout (local_size_x = 2, local_size_y = 2, local_size_z=1) in;
+
+layout (rgba32f, binding = 1) uniform image2D img_levelprev;//input
+layout (rgba32f, binding = 2) uniform image2D img_levelafter;//output
+
+layout (rgba32f, binding = 3) uniform image2D img2_levelprev;//input
+layout (rgba32f, binding = 4) uniform image2D img2_levelafter;//output
+
+shared vec8 localData[gl_WorkGroupSize.x][gl_WorkGroupSize.y];
+
+void main() {
+
+    ivec2 coords = ivec2(gl_GlobalInvocationID.xy);
+    localData   [gl_LocalInvocationID.x][gl_LocalInvocationID.y].data1 =  imageLoad(img_levelprev, coords);
+    localData   [gl_LocalInvocationID.x][gl_LocalInvocationID.y].data2 =  imageLoad(img2_levelprev, coords);
+    uvec2 p = gl_LocalInvocationID.xy ;
+    barrier();
+
+    for(int delta= int(gl_WorkGroupSize.x)/2;delta>0;delta/=2)
+    {
+        if(gl_LocalInvocationID.x < delta) {
+            localData[p.x][p.y].data1 += localData[p.x+delta][p.y].data1;
+            localData[p.x][p.y].data2 += localData[p.x+delta][p.y].data2;
+        }
+        barrier();
+    }
+
+
+    for(int delta= int(gl_WorkGroupSize.y)/2;delta>0;delta/=2) {
+        if(gl_LocalInvocationID.y < delta) {
+            localData[p.x][p.y].data1 += localData[p.x][p.y+delta].data1;
+            localData[p.x][p.y].data2 += localData[p.x][p.y+delta].data2;
+        }
+        barrier();
+    }
+
+
+    if((gl_LocalInvocationID.x==0) && (gl_LocalInvocationID.y==0)) {
+    imageStore(img_levelafter, ivec2(coords.x/gl_WorkGroupSize.x , coords.y/gl_WorkGroupSize.y) , localData[0][0].data1);
+    imageStore(img2_levelafter, ivec2(coords.x/gl_WorkGroupSize.x , coords.y/gl_WorkGroupSize.y) , localData[0][0].data2);
+    }
+
+}
